@@ -51,6 +51,7 @@ const Instruction = union(enum) {
     // Control flow
     halt,
     jmp: usize,
+    cond_jmp: usize,
 };
 
 const VMTrap = error{
@@ -104,7 +105,9 @@ const VM = struct {
     }
 
     pub fn run(self: *VM, program: []Instruction) VMTrap!void {
+        self.stack_pointer = 0;
         self.instruction_pointer = 0;
+
         while (self.instruction_pointer < program.len) {
             const instruction = program[self.instruction_pointer];
             if (instruction == .halt) {
@@ -185,10 +188,18 @@ const VM = struct {
             },
             .push_boolean => |value| {
                 try self.push_boolean(value);
+                self.instruction_pointer += 1;
             },
             .halt => {},
             .jmp => |target| {
                 self.instruction_pointer = target;
+            },
+            .cond_jmp => |target| {
+                if (try self.pop_boolean()) {
+                    self.instruction_pointer = target;
+                } else {
+                    self.instruction_pointer += 1;
+                }
             },
         }
     }
@@ -899,4 +910,40 @@ test "Jump instruction basic functionality" {
     try std.testing.expectEqual(@as(usize, 2), vm.stack_pointer);
     try std.testing.expectEqual(@as(Word, 30), try vm.pop_int());
     try std.testing.expectEqual(@as(Word, 10), try vm.pop_int());
+}
+
+test "Conditional jump functionality" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var vm = VM.init(gpa.allocator());
+    defer vm.deinit();
+
+    // Test conditional jump with true condition
+    var program1 = [_]Instruction{
+        .{ .push_boolean = true },
+        .{ .cond_jmp = 3 }, // Jump to instruction 3 if true
+        .{ .push_int = 20 }, // Should be skipped
+        .{ .push_int = 30 },
+        .halt,
+    };
+
+    try vm.run(&program1);
+
+    try std.testing.expectEqual(@as(usize, 1), vm.stack_pointer);
+    try std.testing.expectEqual(@as(Word, 30), try vm.pop_int());
+
+    // Test conditional jump with false condition
+    var program2 = [_]Instruction{
+        .{ .push_boolean = false },
+        .{ .cond_jmp = 3 }, // Should not jump since condition is false
+        .{ .push_int = 20 }, // Should execute
+        .{ .push_int = 30 },
+        .halt,
+    };
+
+    try vm.run(&program2);
+
+    try std.testing.expectEqual(@as(usize, 2), vm.stack_pointer);
+    try std.testing.expectEqual(@as(Word, 30), try vm.pop_int());
+    try std.testing.expectEqual(@as(Word, 20), try vm.pop_int());
 }
