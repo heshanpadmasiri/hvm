@@ -34,6 +34,11 @@ const Instruction = union(enum) {
     // String instructions
     concat,
 
+    // Boolean instructions
+    @"or",
+    @"and",
+    not,
+
     // Stack manipulation instructions
     dup,
     drop,
@@ -119,6 +124,20 @@ const VM = struct {
                 const result = try self.string_concat();
                 try self.push_string_owned(result);
             },
+            .@"or" => {
+                const b = try self.pop_boolean();
+                const a = try self.pop_boolean();
+                try self.push_boolean(a or b);
+            },
+            .@"and" => {
+                const b = try self.pop_boolean();
+                const a = try self.pop_boolean();
+                try self.push_boolean(a and b);
+            },
+            .not => {
+                const a = try self.pop_boolean();
+                try self.push_boolean(!a);
+            },
             .dup => {
                 if (self.stack_pointer >= MAX_STACK_SIZE) return error.StackOverflow;
                 self.stack[self.stack_pointer] = self.stack[self.stack_pointer - 1];
@@ -151,10 +170,10 @@ const VM = struct {
 
     fn pop_int(self: *VM) VMTrap!Word {
         if (self.stack_pointer == 0) return error.StackUnderflow;
-        self.stack_pointer -= 1;
-        const word = self.stack[self.stack_pointer];
+        const word = self.stack[self.stack_pointer - 1];
         const ty = value_type(word);
         if (ty != ValueType.integer) return error.TypeMismatch;
+        self.stack_pointer -= 1;
 
         if (is_immediate(word)) {
             const value = unpack_immediate(word);
@@ -182,10 +201,10 @@ const VM = struct {
 
     fn pop_string_value(self: *VM) VMTrap!struct { ptr: *anyopaque, string_value: *StringValue } {
         if (self.stack_pointer == 0) return error.StackUnderflow;
-        self.stack_pointer -= 1;
-        const word = self.stack[self.stack_pointer];
+        const word = self.stack[self.stack_pointer - 1];
         const ty = value_type(word);
         if (ty != ValueType.string) return error.TypeMismatch;
+        self.stack_pointer -= 1;
 
         const ptr = unpack_pointer(word);
         const aligned_ptr = @as(*align(8) anyopaque, @alignCast(ptr));
@@ -195,11 +214,11 @@ const VM = struct {
 
     fn pop_boolean(self: *VM) VMTrap!bool {
         if (self.stack_pointer == 0) return error.StackUnderflow;
-        self.stack_pointer -= 1;
-        const word = self.stack[self.stack_pointer];
+        const word = self.stack[self.stack_pointer - 1];
         const ty = value_type(word);
         if (ty != ValueType.boolean) return error.TypeMismatch;
         std.debug.assert(is_immediate(word));
+        self.stack_pointer -= 1;
 
         const value = unpack_immediate(word);
         return value != 0;
@@ -314,12 +333,79 @@ pub fn main() !void {
     var vm = VM.init(gpa.allocator());
     defer vm.deinit();
 
-    // Test push and add
+    // Test pushing true boolean value
+    try vm.exec(.{ .push_boolean = true });
+    try std.testing.expectEqual(true, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    // Test pushing false boolean value
+    try vm.exec(.{ .push_boolean = false });
+    try std.testing.expectEqual(false, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    // Test multiple boolean values
+    try vm.exec(.{ .push_boolean = true });
+    try vm.exec(.{ .push_boolean = false });
+    try vm.exec(.{ .push_boolean = true });
+
+    try std.testing.expectEqual(true, try vm.pop_boolean());
+    try std.testing.expectEqual(false, try vm.pop_boolean());
+    try std.testing.expectEqual(true, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    // Test boolean OR operation
+    try vm.exec(.{ .push_boolean = true });
+    try vm.exec(.{ .push_boolean = false });
+    try vm.exec(.@"or");
+    try std.testing.expectEqual(true, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    try vm.exec(.{ .push_boolean = false });
+    try vm.exec(.{ .push_boolean = false });
+    try vm.exec(.@"or");
+    try std.testing.expectEqual(false, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    // Test boolean AND operation
+    try vm.exec(.{ .push_boolean = true });
+    try vm.exec(.{ .push_boolean = true });
+    try vm.exec(.@"and");
+    try std.testing.expectEqual(true, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    try vm.exec(.{ .push_boolean = true });
+    try vm.exec(.{ .push_boolean = false });
+    try vm.exec(.@"and");
+    try std.testing.expectEqual(false, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    // Test boolean NOT operation
+    try vm.exec(.{ .push_boolean = true });
+    try vm.exec(.not);
+    try std.testing.expectEqual(false, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    try vm.exec(.{ .push_boolean = false });
+    try vm.exec(.not);
+    try std.testing.expectEqual(true, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    // Test stack underflow
+    try std.testing.expectError(error.StackUnderflow, vm.pop_boolean());
+
+    // Test type mismatch errors
     try vm.exec(.{ .push_int = 1 });
-    try vm.exec(.{ .push_int = 2 });
-    print_vm(&vm);
-    try vm.exec(.add);
-    print_vm(&vm);
+    try std.testing.expectError(error.TypeMismatch, vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    try vm.exec(.{ .push_boolean = true });
+    try vm.exec(.{ .push_int = 1 });
+    try std.testing.expectError(error.TypeMismatch, vm.exec(.@"or"));
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    try vm.exec(.{ .push_string = "test" });
+    try std.testing.expectError(error.TypeMismatch, vm.exec(.not));
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
 }
 
 fn print_vm(vm: *const VM) void {
@@ -584,6 +670,7 @@ test "VM string operations" {
     // Test stack underflow
     try std.testing.expectError(error.StackUnderflow, vm.pop_string());
 }
+
 test "VM boolean operations" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -593,10 +680,12 @@ test "VM boolean operations" {
     // Test pushing true boolean value
     try vm.exec(.{ .push_boolean = true });
     try std.testing.expectEqual(true, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
 
     // Test pushing false boolean value
     try vm.exec(.{ .push_boolean = false });
     try std.testing.expectEqual(false, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
 
     // Test multiple boolean values
     try vm.exec(.{ .push_boolean = true });
@@ -606,7 +695,56 @@ test "VM boolean operations" {
     try std.testing.expectEqual(true, try vm.pop_boolean());
     try std.testing.expectEqual(false, try vm.pop_boolean());
     try std.testing.expectEqual(true, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    // Test boolean OR operation
+    try vm.exec(.{ .push_boolean = true });
+    try vm.exec(.{ .push_boolean = false });
+    try vm.exec(.@"or");
+    try std.testing.expectEqual(true, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    try vm.exec(.{ .push_boolean = false });
+    try vm.exec(.{ .push_boolean = false });
+    try vm.exec(.@"or");
+    try std.testing.expectEqual(false, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    // Test boolean AND operation
+    try vm.exec(.{ .push_boolean = true });
+    try vm.exec(.{ .push_boolean = true });
+    try vm.exec(.@"and");
+    try std.testing.expectEqual(true, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    try vm.exec(.{ .push_boolean = true });
+    try vm.exec(.{ .push_boolean = false });
+    try vm.exec(.@"and");
+    try std.testing.expectEqual(false, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    // Test boolean NOT operation
+    try vm.exec(.{ .push_boolean = true });
+    try vm.exec(.not);
+    try std.testing.expectEqual(false, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    try vm.exec(.{ .push_boolean = false });
+    try vm.exec(.not);
+    try std.testing.expectEqual(true, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
 
     // Test stack underflow
     try std.testing.expectError(error.StackUnderflow, vm.pop_boolean());
+
+    // Test type mismatch errors
+    try vm.exec(.{ .push_int = 1 });
+    try std.testing.expectError(error.TypeMismatch, vm.pop_boolean());
+
+    try vm.exec(.{ .push_boolean = true });
+    try vm.exec(.{ .push_int = 1 });
+    try std.testing.expectError(error.TypeMismatch, vm.exec(.@"or"));
+
+    try vm.exec(.{ .push_string = "test" });
+    try std.testing.expectError(error.TypeMismatch, vm.exec(.not));
 }
