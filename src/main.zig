@@ -1112,3 +1112,71 @@ test "VM string equality comparison" {
     try vm.exec(.{ .push_int = 10 });
     try std.testing.expectError(error.TypeMismatch, vm.exec(.str_eq));
 }
+
+test "VM conditional branching with comparisons" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var vm = VM.init(gpa.allocator());
+    defer vm.deinit();
+
+    // Create a program that uses integer comparison and conditional branching
+    var int_program = [_]Instruction{
+        .{ .push_int = 10 },
+        .{ .push_int = 5 },
+        .{ .i_comp = .gt }, // 10 > 5 = true
+        .{ .cond_jmp = 6 }, // Jump to instruction 6 if true
+        .{ .push_int = 0 }, // This should be skipped
+        .{ .jmp = 7 }, // Jump to end
+        .{ .push_int = 1 }, // This should be executed
+        .halt,
+    };
+
+    // Run the integer comparison program
+    try vm.run(&int_program);
+    try std.testing.expectEqual(@as(usize, 1), vm.stack_pointer);
+    try std.testing.expectEqual(@as(Word, 1), try vm.pop_int());
+
+    // Create a program that uses string comparison and conditional branching
+    var string_program = [_]Instruction{
+        .{ .push_string = "hello" },
+        .{ .push_string = "world" },
+        .str_eq, // "hello" == "world" = false
+        .{ .cond_jmp = 6 }, // Skip if true (should not jump)
+        .{ .push_string = "not equal" },
+        .{ .jmp = 7 }, // Jump to end
+        .{ .push_string = "equal" }, // This should not be executed
+        .halt,
+    };
+
+    // Run the string comparison program
+    try vm.run(&string_program);
+    try std.testing.expectEqual(@as(usize, 1), vm.stack_pointer);
+
+    const result = try vm.pop_string();
+    defer vm.allocator.free(result);
+    try std.testing.expectEqualStrings("not equal", result);
+
+    // Create a complex program with multiple comparisons and branches
+    var complex_program = [_]Instruction{
+        .{ .push_int = 20 },
+        .{ .push_int = 20 },
+        .{ .i_comp = .eq }, // 20 == 20 = true
+        .{ .push_string = "abc" },
+        .{ .push_string = "abc" },
+        .str_eq, // "abc" == "abc" = true
+        .@"and", // true AND true = true
+        .{ .cond_jmp = 10 }, // Jump if true
+        .{ .push_string = "condition failed" },
+        .{ .jmp = 11 },
+        .{ .push_string = "condition passed" },
+        .halt,
+    };
+
+    // Run the complex program
+    try vm.run(&complex_program);
+    try std.testing.expectEqual(@as(usize, 1), vm.stack_pointer);
+
+    const complex_result = try vm.pop_string();
+    defer vm.allocator.free(complex_result);
+    try std.testing.expectEqualStrings("condition passed", complex_result);
+}
