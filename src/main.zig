@@ -16,6 +16,7 @@ const MAX_IMMEDIATE_INT: u64 = (1 << @as(usize, 64 - @as(usize, TYPE_TAG_SIZE) -
 const ValueType = enum(u8) {
     integer = 0x01,
     string = 0x02,
+    boolean = 0x03,
 };
 
 const StringValue = struct {
@@ -40,6 +41,7 @@ const Instruction = union(enum) {
     // Value creation instructions
     push_int: u64,
     push_string: []const u8,
+    push_boolean: bool,
 };
 
 const VMTrap = error{
@@ -132,6 +134,9 @@ const VM = struct {
             .push_string => |str| {
                 try self.push_string(str);
             },
+            .push_boolean => |value| {
+                try self.push_boolean(value);
+            },
         }
     }
 
@@ -186,6 +191,25 @@ const VM = struct {
         const aligned_ptr = @as(*align(8) anyopaque, @alignCast(ptr));
         const string_value = @as(*StringValue, @ptrCast(aligned_ptr));
         return .{ .ptr = ptr, .string_value = string_value };
+    }
+
+    fn pop_boolean(self: *VM) VMTrap!bool {
+        if (self.stack_pointer == 0) return error.StackUnderflow;
+        self.stack_pointer -= 1;
+        const word = self.stack[self.stack_pointer];
+        const ty = value_type(word);
+        if (ty != ValueType.boolean) return error.TypeMismatch;
+        std.debug.assert(is_immediate(word));
+
+        const value = unpack_immediate(word);
+        return value != 0;
+    }
+
+    fn push_boolean(self: *VM, value: bool) VMTrap!void {
+        if (self.stack_pointer >= MAX_STACK_SIZE) return error.StackOverflow;
+        const word = if (value) pack_immediate(1, ValueType.boolean) else pack_immediate(0, ValueType.boolean);
+        self.stack[self.stack_pointer] = word;
+        self.stack_pointer += 1;
     }
 
     fn push_int(self: *VM, value: u64) VMTrap!void {
@@ -559,4 +583,30 @@ test "VM string operations" {
 
     // Test stack underflow
     try std.testing.expectError(error.StackUnderflow, vm.pop_string());
+}
+test "VM boolean operations" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var vm = VM.init(gpa.allocator());
+    defer vm.deinit();
+
+    // Test pushing true boolean value
+    try vm.exec(.{ .push_boolean = true });
+    try std.testing.expectEqual(true, try vm.pop_boolean());
+
+    // Test pushing false boolean value
+    try vm.exec(.{ .push_boolean = false });
+    try std.testing.expectEqual(false, try vm.pop_boolean());
+
+    // Test multiple boolean values
+    try vm.exec(.{ .push_boolean = true });
+    try vm.exec(.{ .push_boolean = false });
+    try vm.exec(.{ .push_boolean = true });
+
+    try std.testing.expectEqual(true, try vm.pop_boolean());
+    try std.testing.expectEqual(false, try vm.pop_boolean());
+    try std.testing.expectEqual(true, try vm.pop_boolean());
+
+    // Test stack underflow
+    try std.testing.expectError(error.StackUnderflow, vm.pop_boolean());
 }
