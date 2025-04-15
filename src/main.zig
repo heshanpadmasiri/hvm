@@ -30,9 +30,14 @@ const Instruction = union(enum) {
     mul,
     div,
 
+    // String instructions
+    concat,
+
     // Stack manipulation instructions
     dup,
     drop,
+
+    // Value creation instructions
     push_int: u64,
     push_string: []const u8,
 };
@@ -108,6 +113,10 @@ const VM = struct {
                 if (b == 0) return error.DivByZero;
                 try self.push_int(a / b);
             },
+            .concat => {
+                const result = try self.string_concat();
+                try self.push_string_owned(result);
+            },
             .dup => {
                 if (self.stack_pointer >= MAX_STACK_SIZE) return error.StackOverflow;
                 self.stack[self.stack_pointer] = self.stack[self.stack_pointer - 1];
@@ -124,6 +133,15 @@ const VM = struct {
                 try self.push_string(str);
             },
         }
+    }
+
+    fn string_concat(self: *VM) VMTrap![]u8 {
+        const b_result = try self.pop_string_value();
+        defer self.free(b_result.ptr, ValueType.string);
+        const a_result = try self.pop_string_value();
+        defer self.free(a_result.ptr, ValueType.string);
+        const result = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ a_result.string_value.bytes, b_result.string_value.bytes });
+        return result;
     }
 
     fn pop_int(self: *VM) VMTrap!Word {
@@ -145,6 +163,19 @@ const VM = struct {
     }
 
     fn pop_string(self: *VM) VMTrap![]const u8 {
+        const pop_result = try self.pop_string_value();
+        const ptr = pop_result.ptr;
+        const string_value = pop_result.string_value;
+
+        // Make a copy of the string bytes
+        const result = try self.allocator.alloc(u8, string_value.len);
+        @memcpy(result, string_value.bytes);
+
+        self.free(ptr, ValueType.string);
+        return result;
+    }
+
+    fn pop_string_value(self: *VM) VMTrap!struct { ptr: *anyopaque, string_value: *StringValue } {
         if (self.stack_pointer == 0) return error.StackUnderflow;
         self.stack_pointer -= 1;
         const word = self.stack[self.stack_pointer];
@@ -154,13 +185,7 @@ const VM = struct {
         const ptr = unpack_pointer(word);
         const aligned_ptr = @as(*align(8) anyopaque, @alignCast(ptr));
         const string_value = @as(*StringValue, @ptrCast(aligned_ptr));
-
-        // Make a copy of the string bytes
-        const result = try self.allocator.alloc(u8, string_value.len);
-        @memcpy(result, string_value.bytes);
-
-        self.free(ptr, ty);
-        return result;
+        return .{ .ptr = ptr, .string_value = string_value };
     }
 
     fn push_int(self: *VM, value: u64) VMTrap!void {
@@ -178,6 +203,22 @@ const VM = struct {
         const word = try alloc_string(self, str);
         self.stack[self.stack_pointer] = word;
         self.stack_pointer += 1;
+    }
+
+    fn push_string_owned(self: *VM, str: []u8) VMTrap!void {
+        if (self.stack_pointer >= MAX_STACK_SIZE) return error.StackOverflow;
+        const word = try string_value_from_owned(self, str);
+        self.stack[self.stack_pointer] = word;
+        self.stack_pointer += 1;
+    }
+
+    fn string_value_from_owned(self: *VM, str: []u8) VMTrap!Word {
+        const string_value = try self.allocator.create(StringValue);
+        string_value.* = .{
+            .len = str.len,
+            .bytes = str,
+        };
+        return pack_pointer(string_value, ValueType.string, 0);
     }
 
     fn alloc_string(self: *VM, str: []const u8) VMTrap!Word {
@@ -507,6 +548,14 @@ test "VM string operations" {
     defer vm.allocator.free(first);
     try std.testing.expectEqualStrings("Second", second);
     try std.testing.expectEqualStrings("First", first);
+
+    // Test string concatenation
+    try vm.exec(.{ .push_string = "Hello, " });
+    try vm.exec(.{ .push_string = "World!" });
+    try vm.exec(.concat);
+    const concatenated = try vm.pop_string();
+    defer vm.allocator.free(concatenated);
+    try std.testing.expectEqualStrings("Hello, World!", concatenated);
 
     // Test stack underflow
     try std.testing.expectError(error.StackUnderflow, vm.pop_string());
