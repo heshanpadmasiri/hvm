@@ -56,16 +56,13 @@ fn type_mask(ty: ValueType) u64 {
 const VM = struct {
     stack: [MAX_STACK_SIZE]Word,
     stack_pointer: usize,
-    gpa: std.heap.GeneralPurposeAllocator(.{}),
     allocator: std.mem.Allocator,
 
-    pub fn init() VM {
-        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    pub fn init(allocator: std.mem.Allocator) VM {
         const self = VM{
             .stack = [_]Word{0} ** MAX_STACK_SIZE,
             .stack_pointer = 0,
-            .gpa = gpa,
-            .allocator = gpa.allocator(),
+            .allocator = allocator,
         };
         return self;
     }
@@ -74,12 +71,9 @@ const VM = struct {
         for (self.stack[0..self.stack_pointer]) |word| {
             if (is_pointer(word)) {
                 const ptr = unpack_pointer(word);
-                const aligned_ptr = @as(*align(8) anyopaque, @alignCast(ptr));
-                const ptr_slice = @as([*]u64, @ptrCast(aligned_ptr))[0..1];
-                self.allocator.free(ptr_slice);
+                self.free(ptr);
             }
         }
-        _ = self.gpa.deinit();
     }
 
     pub fn exec(self: *VM, instruction: Instruction) VMTrap!void {
@@ -136,8 +130,9 @@ const VM = struct {
         }
         const ptr = unpack_pointer(word);
         const aligned_ptr = @as(*align(8) anyopaque, @alignCast(ptr));
-        const ptr_u64 = @as(*u64, @ptrCast(aligned_ptr));
-        return ptr_u64.*;
+        const value = @as(*align(8) u64, @ptrCast(aligned_ptr)).*;
+        self.free(ptr);
+        return value;
     }
 
     fn push_int(self: *VM, value: u64) VMTrap!void {
@@ -160,6 +155,12 @@ const VM = struct {
 
     fn alloc(self: *VM, n: usize) VMTrap![]u8 {
         return try self.allocator.alignedAlloc(u8, 8, n);
+    }
+
+    fn free(self: *VM, ptr: *anyopaque) void {
+        const aligned_ptr = @as(*align(8) anyopaque, @alignCast(ptr));
+        const ptr_slice = @as([*]align(8) u8, @ptrCast(aligned_ptr))[0..@sizeOf(u64)];
+        self.allocator.free(ptr_slice);
     }
 };
 
@@ -191,7 +192,9 @@ fn unpack_immediate(word: Word) u64 {
 }
 
 pub fn main() !void {
-    var vm = VM.init();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var vm = VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Test push and add
@@ -216,7 +219,9 @@ fn print_vm(vm: *const VM) void {
 }
 
 test "VM stack manipulation instructions" {
-    var vm = VM.init();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var vm = VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Test push_int
@@ -263,7 +268,9 @@ test "VM stack manipulation instructions" {
 }
 
 test "VM integer overflow" {
-    var vm = VM.init();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var vm = VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Test addition overflow
@@ -297,7 +304,9 @@ test "VM integer overflow" {
 }
 
 test "VM stack underflow" {
-    var vm = VM.init();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var vm = VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Test underflow on empty stack
@@ -316,7 +325,9 @@ test "VM stack underflow" {
 }
 
 test "VM stack overflow" {
-    var vm = VM.init();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var vm = VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Fill the stack to capacity
@@ -331,7 +342,9 @@ test "VM stack overflow" {
 }
 
 test "VM division by zero" {
-    var vm = VM.init();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var vm = VM.init(gpa.allocator());
     defer vm.deinit();
 
     try vm.exec(.{ .push_int = 10 });
@@ -340,7 +353,9 @@ test "VM division by zero" {
 }
 
 test "VM arithmetic operations" {
-    var vm = VM.init();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var vm = VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Test push and add
@@ -371,7 +386,9 @@ test "VM arithmetic operations" {
 }
 
 test "VM arithmetic operations with non-immediate values" {
-    var vm = VM.init();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var vm = VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Create a value that will be non-immediate (larger than MAX_IMMEDIATE_INT)
