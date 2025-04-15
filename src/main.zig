@@ -15,7 +15,7 @@ const MAX_IMMEDIATE_INT: u64 = (1 << @as(usize, 64 - @as(usize, TYPE_TAG_SIZE) -
 
 const ValueType = enum(u8) {
     integer = 0x01,
-    // Add more types as needed
+    string = 0x02,
 };
 
 const Instruction = union(enum) {
@@ -29,6 +29,7 @@ const Instruction = union(enum) {
     dup,
     drop,
     push_int: u64,
+    push_string: []const u8,
 };
 
 const VMTrap = error{
@@ -114,6 +115,9 @@ const VM = struct {
             .push_int => |value| {
                 try self.push_int(value);
             },
+            .push_string => |str| {
+                try self.push_string(str);
+            },
         }
     }
 
@@ -135,6 +139,21 @@ const VM = struct {
         return value;
     }
 
+    fn pop_string(self: *VM) VMTrap![]const u8 {
+        if (self.stack_pointer == 0) return error.StackUnderflow;
+        self.stack_pointer -= 1;
+        const word = self.stack[self.stack_pointer];
+        const ty = value_type(word);
+        if (ty != ValueType.string) return error.TypeMismatch;
+
+        const ptr = unpack_pointer(word);
+        const aligned_ptr = @as(*align(8) anyopaque, @alignCast(ptr));
+        const ptr_slice = @as([*]u8, @ptrCast(aligned_ptr));
+        // The length is stored in the first 8 bytes
+        const len = @as(*u64, @ptrCast(aligned_ptr)).*;
+        return ptr_slice[8 .. 8 + len];
+    }
+
     fn push_int(self: *VM, value: u64) VMTrap!void {
         if (self.stack_pointer >= MAX_STACK_SIZE) return error.StackOverflow;
         const word = if (value <= MAX_IMMEDIATE_INT)
@@ -143,6 +162,19 @@ const VM = struct {
             try alloc_int(self, value);
         self.stack[self.stack_pointer] = word;
         self.stack_pointer += 1;
+    }
+
+    fn push_string(self: *VM, str: []const u8) VMTrap!void {
+        if (self.stack_pointer >= MAX_STACK_SIZE) return error.StackOverflow;
+        const word = try alloc_string(self, str);
+        self.stack[self.stack_pointer] = word;
+        self.stack_pointer += 1;
+    }
+
+    fn alloc_string(self: *VM, str: []const u8) VMTrap!Word {
+        const bytes = try self.alloc(str.len);
+        @memcpy(bytes, str);
+        return pack_pointer(bytes.ptr, ValueType.string, 0);
     }
 
     fn alloc_int(self: *VM, value: u64) VMTrap!Word {
@@ -266,6 +298,42 @@ test "VM stack manipulation instructions" {
     try std.testing.expectEqual(@as(Word, 10), try vm.pop_int());
     try std.testing.expectEqual(@as(Word, 10), try vm.pop_int());
 }
+
+// test "VM integer overflow" {
+//     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+//     defer _ = gpa.deinit();
+//     var vm = VM.init(gpa.allocator());
+//     defer vm.deinit();
+
+//     // Test pushing a string constant
+//     const test_str = "Hello, world!";
+//     try vm.exec(.{ .push_string = test_str });
+//     try std.testing.expectEqual(@as(usize, 1), vm.stack_pointer);
+
+//     // Pop and verify the string
+//     const popped_str = try vm.pop_string();
+//     try std.testing.expectEqualStrings(test_str, popped_str);
+//     try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+//     // Test pushing multiple strings
+//     const str1 = "First string";
+//     const str2 = "Second string";
+//     try vm.exec(.{ .push_string = str1 });
+//     try vm.exec(.{ .push_string = str2 });
+//     try std.testing.expectEqual(@as(usize, 2), vm.stack_pointer);
+
+//     // Pop in reverse order and verify
+//     const popped_str2 = try vm.pop_string();
+//     const popped_str1 = try vm.pop_string();
+//     try std.testing.expectEqualStrings(str2, popped_str2);
+//     try std.testing.expectEqualStrings(str1, popped_str1);
+
+//     // Test empty string
+//     const empty_str = "";
+//     try vm.exec(.{ .push_string = empty_str });
+//     const popped_empty = try vm.pop_string();
+//     try std.testing.expectEqualStrings(empty_str, popped_empty);
+// }
 
 test "VM integer overflow" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
