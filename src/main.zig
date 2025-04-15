@@ -3,6 +3,21 @@ const std = @import("std");
 const MAX_STACK_SIZE = 512;
 const Word = u64;
 
+// Pointer packing constants
+const TAG_SIZE: u6 = 3;
+const TAG_MASK: u64 = (1 << TAG_SIZE) - 1;
+const IMMEDIATE_BIT: u64 = 0x1;
+const TYPE_TAG_SIZE: u6 = 8;
+const TYPE_MASK: u64 = 0xFF00000000000000;
+const POINTER_MASK: u64 = ~(TAG_MASK | TYPE_MASK);
+
+const MAX_IMMEDIATE_INT: u64 = (1 << @as(usize, 64 - @as(usize, TYPE_TAG_SIZE) - @as(usize, TAG_SIZE))) - 1;
+
+const ValueType = enum(u8) {
+    integer = 0x01,
+    // Add more types as needed
+};
+
 const Instruction = union(enum) {
     // Arithmetic instructions
     add,
@@ -27,7 +42,16 @@ const VMTrap = error{
     // Stack errors
     StackUnderflow,
     StackOverflow,
+    OutOfMemory,
 };
+
+fn value_type(word: Word) ValueType {
+    return @as(ValueType, @enumFromInt((word & TYPE_MASK) >> 56));
+}
+
+fn type_mask(ty: ValueType) u64 {
+    return (@as(u64, @intFromEnum(ty)) << 56);
+}
 
 const VM = struct {
     stack: [MAX_STACK_SIZE]Word,
@@ -47,6 +71,14 @@ const VM = struct {
     }
 
     pub fn deinit(self: *VM) void {
+        for (self.stack[0..self.stack_pointer]) |word| {
+            if (is_pointer(word)) {
+                const ptr = unpack_pointer(word);
+                const aligned_ptr = @as(*align(8) anyopaque, @alignCast(ptr));
+                const ptr_slice = @as([*]u64, @ptrCast(aligned_ptr))[0..1];
+                self.allocator.free(ptr_slice);
+            }
+        }
         _ = self.gpa.deinit();
     }
 
@@ -86,9 +118,7 @@ const VM = struct {
                 self.stack_pointer -= 1;
             },
             .push_const_int => |value| {
-                if (self.stack_pointer >= MAX_STACK_SIZE) return error.StackOverflow;
-                self.stack[self.stack_pointer] = value;
-                self.stack_pointer += 1;
+                try self.push_int(value);
             },
         }
     }
@@ -96,19 +126,69 @@ const VM = struct {
     fn pop_int(self: *VM) VMTrap!Word {
         if (self.stack_pointer == 0) return error.StackUnderflow;
         self.stack_pointer -= 1;
-        return self.stack[self.stack_pointer];
+        const word = self.stack[self.stack_pointer];
+        const ty = value_type(word);
+        if (ty != ValueType.integer) return error.TypeMismatch;
+
+        if (is_immediate(word)) {
+            const value = unpack_immediate(word);
+            return value;
+        }
+        const ptr = unpack_pointer(word);
+        const aligned_ptr = @as(*align(8) anyopaque, @alignCast(ptr));
+        const ptr_u64 = @as(*u64, @ptrCast(aligned_ptr));
+        return ptr_u64.*;
     }
 
-    fn push_int(self: *VM, value: Word) VMTrap!void {
+    fn push_int(self: *VM, value: u64) VMTrap!void {
         if (self.stack_pointer >= MAX_STACK_SIZE) return error.StackOverflow;
-        self.stack[self.stack_pointer] = value;
+        const word = if (value <= MAX_IMMEDIATE_INT)
+            pack_immediate(value, ValueType.integer)
+        else
+            try alloc_int(self, value);
+        self.stack[self.stack_pointer] = word;
         self.stack_pointer += 1;
     }
 
-    fn alloc_int(_: *VM, value: u64) VMTrap!Word {
-        return value;
+    fn alloc_int(self: *VM, value: u64) VMTrap!Word {
+        const bytes = try self.alloc(@sizeOf(u64));
+        const aligned_ptr = @as([*]align(8) u8, @alignCast(bytes.ptr));
+        const ptr = @as([*]u64, @ptrCast(aligned_ptr));
+        ptr[0] = value;
+        return pack_pointer(bytes.ptr, ValueType.integer, 0);
+    }
+
+    fn alloc(self: *VM, n: usize) VMTrap![]u8 {
+        return try self.allocator.alignedAlloc(u8, 8, n);
     }
 };
+
+// Helper functions for pointer packing
+fn is_pointer(word: Word) bool {
+    return (word & TYPE_MASK) != 0 and (word & IMMEDIATE_BIT) == 0;
+}
+
+fn is_immediate(word: Word) bool {
+    return (word & IMMEDIATE_BIT) != 0;
+}
+
+fn pack_pointer(ptr: *anyopaque, ty: ValueType, tag: u3) Word {
+    const ptr_value = @intFromPtr(ptr);
+    return type_mask(ty) | (ptr_value & POINTER_MASK) | tag;
+}
+
+fn pack_immediate(value: u64, ty: ValueType) Word {
+    const shifted_value = value << TAG_SIZE;
+    return type_mask(ty) | (shifted_value & POINTER_MASK) | IMMEDIATE_BIT;
+}
+
+fn unpack_pointer(word: Word) *anyopaque {
+    return @ptrFromInt(word & POINTER_MASK);
+}
+
+fn unpack_immediate(word: Word) u64 {
+    return (word & POINTER_MASK) >> TAG_SIZE;
+}
 
 pub fn main() !void {
     var vm = VM.init();
@@ -142,42 +222,44 @@ test "VM stack manipulation instructions" {
     // Test push_const_int
     try vm.exec(.{ .push_const_int = 42 });
     try std.testing.expectEqual(@as(usize, 1), vm.stack_pointer);
-    try std.testing.expectEqual(@as(Word, 42), vm.stack[0]);
+    try std.testing.expectEqual(@as(Word, 42), try vm.pop_int());
 
     // Test dup
+    try vm.exec(.{ .push_const_int = 42 });
     try vm.exec(.dup);
     try std.testing.expectEqual(@as(usize, 2), vm.stack_pointer);
-    try std.testing.expectEqual(@as(Word, 42), vm.stack[0]);
-    try std.testing.expectEqual(@as(Word, 42), vm.stack[1]);
+    const val1 = try vm.pop_int();
+    const val2 = try vm.pop_int();
+    try std.testing.expectEqual(@as(Word, 42), val1);
+    try std.testing.expectEqual(@as(Word, 42), val2);
 
     // Test drop
+    try vm.exec(.{ .push_const_int = 42 });
     try vm.exec(.drop);
-    try std.testing.expectEqual(@as(usize, 1), vm.stack_pointer);
-    try std.testing.expectEqual(@as(Word, 42), vm.stack[0]);
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
 
     // Test multiple push operations
     try vm.exec(.{ .push_const_int = 10 });
     try vm.exec(.{ .push_const_int = 20 });
     try vm.exec(.{ .push_const_int = 30 });
-    try std.testing.expectEqual(@as(usize, 4), vm.stack_pointer);
-    try std.testing.expectEqual(@as(Word, 42), vm.stack[0]);
-    try std.testing.expectEqual(@as(Word, 10), vm.stack[1]);
-    try std.testing.expectEqual(@as(Word, 20), vm.stack[2]);
-    try std.testing.expectEqual(@as(Word, 30), vm.stack[3]);
+    try std.testing.expectEqual(@as(usize, 3), vm.stack_pointer);
+    try std.testing.expectEqual(@as(Word, 30), try vm.pop_int());
+    try std.testing.expectEqual(@as(Word, 20), try vm.pop_int());
+    try std.testing.expectEqual(@as(Word, 10), try vm.pop_int());
 
     // Test multiple drops
+    try vm.exec(.{ .push_const_int = 42 });
+    try vm.exec(.{ .push_const_int = 10 });
     try vm.exec(.drop);
-    try vm.exec(.drop);
-    try std.testing.expectEqual(@as(usize, 2), vm.stack_pointer);
-    try std.testing.expectEqual(@as(Word, 42), vm.stack[0]);
-    try std.testing.expectEqual(@as(Word, 10), vm.stack[1]);
+    try std.testing.expectEqual(@as(usize, 1), vm.stack_pointer);
+    try std.testing.expectEqual(@as(Word, 42), try vm.pop_int());
 
     // Test dup with multiple items on stack
+    try vm.exec(.{ .push_const_int = 10 });
     try vm.exec(.dup);
-    try std.testing.expectEqual(@as(usize, 3), vm.stack_pointer);
-    try std.testing.expectEqual(@as(Word, 42), vm.stack[0]);
-    try std.testing.expectEqual(@as(Word, 10), vm.stack[1]);
-    try std.testing.expectEqual(@as(Word, 10), vm.stack[2]);
+    try std.testing.expectEqual(@as(usize, 2), vm.stack_pointer);
+    try std.testing.expectEqual(@as(Word, 10), try vm.pop_int());
+    try std.testing.expectEqual(@as(Word, 10), try vm.pop_int());
 }
 
 test "VM integer overflow" {
@@ -265,23 +347,63 @@ test "VM arithmetic operations" {
     try vm.exec(.{ .push_const_int = 1 });
     try vm.exec(.{ .push_const_int = 2 });
     try vm.exec(.add);
-    try std.testing.expectEqual(@as(Word, 3), vm.stack[vm.stack_pointer - 1]);
+    try std.testing.expectEqual(@as(Word, 3), try vm.pop_int());
 
     // Test multiplication
+    try vm.exec(.{ .push_const_int = 3 });
     try vm.exec(.{ .push_const_int = 4 });
     try vm.exec(.mul);
-    try std.testing.expectEqual(@as(Word, 12), vm.stack[vm.stack_pointer - 1]);
+    try std.testing.expectEqual(@as(Word, 12), try vm.pop_int());
 
-    // Test subtraction
+    // Test subtraction and division
+    try vm.exec(.{ .push_const_int = 12 });
     try vm.exec(.{ .push_const_int = 2 });
     try vm.exec(.sub);
-    try std.testing.expectEqual(@as(Word, 10), vm.stack[vm.stack_pointer - 1]);
+    try std.testing.expectEqual(@as(Word, 10), try vm.pop_int());
 
-    // Test division
+    try vm.exec(.{ .push_const_int = 10 });
     try vm.exec(.{ .push_const_int = 2 });
     try vm.exec(.div);
-    try std.testing.expectEqual(@as(Word, 5), vm.stack[vm.stack_pointer - 1]);
+    try std.testing.expectEqual(@as(Word, 5), try vm.pop_int());
 
     // Test stack underflow
     try std.testing.expectError(error.StackUnderflow, vm.exec(.add));
+}
+
+test "VM arithmetic operations with non-immediate values" {
+    var vm = VM.init();
+    defer vm.deinit();
+
+    // Create a value that will be non-immediate (larger than MAX_IMMEDIATE_INT)
+    const large_value = MAX_IMMEDIATE_INT + 1;
+
+    // Test addition with non-immediate values
+    try vm.exec(.{ .push_const_int = large_value });
+    try vm.exec(.{ .push_const_int = large_value });
+    try vm.exec(.add);
+    try std.testing.expectEqual(@as(Word, large_value * 2), try vm.pop_int());
+
+    // Test multiplication with non-immediate values
+    try vm.exec(.{ .push_const_int = large_value });
+    try vm.exec(.{ .push_const_int = 2 });
+    try vm.exec(.mul);
+    try std.testing.expectEqual(@as(Word, large_value * 2), try vm.pop_int());
+
+    // Test subtraction with non-immediate values
+    try vm.exec(.{ .push_const_int = large_value * 2 });
+    try vm.exec(.{ .push_const_int = large_value });
+    try vm.exec(.sub);
+    try std.testing.expectEqual(@as(Word, large_value), try vm.pop_int());
+
+    // Test division with non-immediate values
+    try vm.exec(.{ .push_const_int = large_value * 2 });
+    try vm.exec(.{ .push_const_int = 2 });
+    try vm.exec(.div);
+    try std.testing.expectEqual(@as(Word, large_value), try vm.pop_int());
+
+    // Test mixed immediate and non-immediate operations
+    try vm.exec(.{ .push_const_int = large_value });
+    try vm.exec(.{ .push_const_int = 1 }); // This will be immediate
+    try vm.exec(.add);
+    try std.testing.expectEqual(@as(Word, large_value + 1), try vm.pop_int());
 }
