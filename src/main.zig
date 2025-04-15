@@ -119,39 +119,35 @@ const VM = struct {
     }
 
     pub fn exec(self: *VM, instruction: Instruction) VMTrap!void {
+        var skip_instruction_pointer_increment = false;
         switch (instruction) {
             .add => {
                 const b = try self.pop_int();
                 const a = try self.pop_int();
                 const result = std.math.add(Word, a, b) catch return error.IntegerOverflow;
                 try self.push_int(result);
-                self.instruction_pointer += 1;
             },
             .sub => {
                 const b = try self.pop_int();
                 const a = try self.pop_int();
                 const result = std.math.sub(Word, a, b) catch return error.IntegerOverflow;
                 try self.push_int(result);
-                self.instruction_pointer += 1;
             },
             .mul => {
                 const b = try self.pop_int();
                 const a = try self.pop_int();
                 const result = std.math.mul(Word, a, b) catch return error.IntegerOverflow;
                 try self.push_int(result);
-                self.instruction_pointer += 1;
             },
             .div => {
                 const b = try self.pop_int();
                 const a = try self.pop_int();
                 if (b == 0) return error.DivByZero;
                 try self.push_int(a / b);
-                self.instruction_pointer += 1;
             },
             .concat => {
                 const result = try self.string_concat();
                 try self.push_string_owned(result);
-                self.instruction_pointer += 1;
             },
             .@"or" => {
                 const b = try self.pop_boolean();
@@ -171,36 +167,34 @@ const VM = struct {
                 if (self.stack_pointer >= MAX_STACK_SIZE) return error.StackOverflow;
                 self.stack[self.stack_pointer] = self.stack[self.stack_pointer - 1];
                 self.stack_pointer += 1;
-                self.instruction_pointer += 1;
             },
             .drop => {
                 if (self.stack_pointer == 0) return error.StackUnderflow;
                 self.stack_pointer -= 1;
-                self.instruction_pointer += 1;
             },
             .push_int => |value| {
                 try self.push_int(value);
-                self.instruction_pointer += 1;
             },
             .push_string => |str| {
                 try self.push_string(str);
-                self.instruction_pointer += 1;
             },
             .push_boolean => |value| {
                 try self.push_boolean(value);
-                self.instruction_pointer += 1;
             },
             .halt => {},
             .jmp => |target| {
                 self.instruction_pointer = target;
+                skip_instruction_pointer_increment = true;
             },
             .cond_jmp => |target| {
                 if (try self.pop_boolean()) {
                     self.instruction_pointer = target;
-                } else {
-                    self.instruction_pointer += 1;
+                    skip_instruction_pointer_increment = true;
                 }
             },
+        }
+        if (!skip_instruction_pointer_increment) {
+            self.instruction_pointer += 1;
         }
     }
 
