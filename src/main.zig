@@ -13,13 +13,16 @@ const Instruction = union(enum) {
     // Stack manipulation instructions
     dup,
     drop,
-    push_const: Word,
+    push_const_int: u64,
 };
 
 const VMTrap = error{
     // Arithmetic errors
     IntegerOverflow,
     DivByZero,
+
+    // Type errors
+    TypeMismatch,
 
     // Stack errors
     StackUnderflow,
@@ -29,49 +32,49 @@ const VMTrap = error{
 const VM = struct {
     stack: [MAX_STACK_SIZE]Word,
     stack_pointer: usize,
+    gpa: std.heap.GeneralPurposeAllocator(.{}),
+    allocator: std.mem.Allocator,
 
     pub fn init() VM {
-        return VM{
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        const self = VM{
             .stack = [_]Word{0} ** MAX_STACK_SIZE,
             .stack_pointer = 0,
+            .gpa = gpa,
+            .allocator = gpa.allocator(),
         };
+        return self;
     }
 
     pub fn deinit(self: *VM) void {
-        // For now, this is a no-op since we don't have any resources to clean up
-        // In the future, this might need to free any allocated memory or close any resources
-        _ = self;
+        _ = self.gpa.deinit();
     }
 
     pub fn exec(self: *VM, instruction: Instruction) VMTrap!void {
         switch (instruction) {
             .add => {
-                if (self.stack_pointer < 2) return error.StackUnderflow;
-                const a = self.stack[self.stack_pointer - 2];
-                const b = self.stack[self.stack_pointer - 1];
-                self.stack[self.stack_pointer - 2] = std.math.add(Word, a, b) catch return error.IntegerOverflow;
-                self.stack_pointer -= 1;
+                const b = try self.pop_int();
+                const a = try self.pop_int();
+                const result = std.math.add(Word, a, b) catch return error.IntegerOverflow;
+                try self.push_int(result);
             },
             .sub => {
-                if (self.stack_pointer < 2) return error.StackUnderflow;
-                const a = self.stack[self.stack_pointer - 2];
-                const b = self.stack[self.stack_pointer - 1];
-                self.stack[self.stack_pointer - 2] = std.math.sub(Word, a, b) catch return error.IntegerOverflow;
-                self.stack_pointer -= 1;
+                const b = try self.pop_int();
+                const a = try self.pop_int();
+                const result = std.math.sub(Word, a, b) catch return error.IntegerOverflow;
+                try self.push_int(result);
             },
             .mul => {
-                if (self.stack_pointer < 2) return error.StackUnderflow;
-                const a = self.stack[self.stack_pointer - 2];
-                const b = self.stack[self.stack_pointer - 1];
-                self.stack[self.stack_pointer - 2] = std.math.mul(Word, a, b) catch return error.IntegerOverflow;
-                self.stack_pointer -= 1;
+                const b = try self.pop_int();
+                const a = try self.pop_int();
+                const result = std.math.mul(Word, a, b) catch return error.IntegerOverflow;
+                try self.push_int(result);
             },
             .div => {
-                if (self.stack_pointer < 2) return error.StackUnderflow;
-                if (self.stack[self.stack_pointer - 1] == 0) return error.DivByZero;
-                // Division by zero is already handled so we can't overflow
-                self.stack[self.stack_pointer - 2] /= self.stack[self.stack_pointer - 1];
-                self.stack_pointer -= 1;
+                const b = try self.pop_int();
+                const a = try self.pop_int();
+                if (b == 0) return error.DivByZero;
+                try self.push_int(a / b);
             },
             .dup => {
                 if (self.stack_pointer >= MAX_STACK_SIZE) return error.StackOverflow;
@@ -82,23 +85,38 @@ const VM = struct {
                 if (self.stack_pointer == 0) return error.StackUnderflow;
                 self.stack_pointer -= 1;
             },
-            .push_const => |value| {
+            .push_const_int => |value| {
                 if (self.stack_pointer >= MAX_STACK_SIZE) return error.StackOverflow;
                 self.stack[self.stack_pointer] = value;
                 self.stack_pointer += 1;
             },
         }
     }
+
+    fn pop_int(self: *VM) VMTrap!Word {
+        if (self.stack_pointer == 0) return error.StackUnderflow;
+        self.stack_pointer -= 1;
+        return self.stack[self.stack_pointer];
+    }
+
+    fn push_int(self: *VM, value: Word) VMTrap!void {
+        if (self.stack_pointer >= MAX_STACK_SIZE) return error.StackOverflow;
+        self.stack[self.stack_pointer] = value;
+        self.stack_pointer += 1;
+    }
+
+    fn alloc_int(_: *VM, value: u64) VMTrap!Word {
+        return value;
+    }
 };
 
 pub fn main() !void {
-    // Empty main function since we're using tests
     var vm = VM.init();
     defer vm.deinit();
 
     // Test push and add
-    try vm.exec(.{ .push_const = 1 });
-    try vm.exec(.{ .push_const = 2 });
+    try vm.exec(.{ .push_const_int = 1 });
+    try vm.exec(.{ .push_const_int = 2 });
     print_vm(&vm);
     try vm.exec(.add);
     print_vm(&vm);
@@ -121,8 +139,8 @@ test "VM stack manipulation instructions" {
     var vm = VM.init();
     defer vm.deinit();
 
-    // Test push_const
-    try vm.exec(.{ .push_const = 42 });
+    // Test push_const_int
+    try vm.exec(.{ .push_const_int = 42 });
     try std.testing.expectEqual(@as(usize, 1), vm.stack_pointer);
     try std.testing.expectEqual(@as(Word, 42), vm.stack[0]);
 
@@ -138,9 +156,9 @@ test "VM stack manipulation instructions" {
     try std.testing.expectEqual(@as(Word, 42), vm.stack[0]);
 
     // Test multiple push operations
-    try vm.exec(.{ .push_const = 10 });
-    try vm.exec(.{ .push_const = 20 });
-    try vm.exec(.{ .push_const = 30 });
+    try vm.exec(.{ .push_const_int = 10 });
+    try vm.exec(.{ .push_const_int = 20 });
+    try vm.exec(.{ .push_const_int = 30 });
     try std.testing.expectEqual(@as(usize, 4), vm.stack_pointer);
     try std.testing.expectEqual(@as(Word, 42), vm.stack[0]);
     try std.testing.expectEqual(@as(Word, 10), vm.stack[1]);
@@ -167,32 +185,32 @@ test "VM integer overflow" {
     defer vm.deinit();
 
     // Test addition overflow
-    try vm.exec(.{ .push_const = std.math.maxInt(Word) });
-    try vm.exec(.{ .push_const = 1 });
+    try vm.exec(.{ .push_const_int = std.math.maxInt(Word) });
+    try vm.exec(.{ .push_const_int = 1 });
     try std.testing.expectError(error.IntegerOverflow, vm.exec(.add));
 
     // Reset stack
     vm.stack_pointer = 0;
 
     // Test subtraction overflow (underflow)
-    try vm.exec(.{ .push_const = 0 });
-    try vm.exec(.{ .push_const = 1 });
+    try vm.exec(.{ .push_const_int = 0 });
+    try vm.exec(.{ .push_const_int = 1 });
     try std.testing.expectError(error.IntegerOverflow, vm.exec(.sub));
 
     // Reset stack
     vm.stack_pointer = 0;
 
     // Test multiplication overflow
-    try vm.exec(.{ .push_const = std.math.maxInt(Word) });
-    try vm.exec(.{ .push_const = 2 });
+    try vm.exec(.{ .push_const_int = std.math.maxInt(Word) });
+    try vm.exec(.{ .push_const_int = 2 });
     try std.testing.expectError(error.IntegerOverflow, vm.exec(.mul));
 
     // Reset stack
     vm.stack_pointer = 0;
 
     // Test large multiplication overflow
-    try vm.exec(.{ .push_const = std.math.maxInt(Word) / 2 + 1 });
-    try vm.exec(.{ .push_const = 2 });
+    try vm.exec(.{ .push_const_int = std.math.maxInt(Word) / 2 + 1 });
+    try vm.exec(.{ .push_const_int = 2 });
     try std.testing.expectError(error.IntegerOverflow, vm.exec(.mul));
 }
 
@@ -208,7 +226,7 @@ test "VM stack underflow" {
     try std.testing.expectError(error.StackUnderflow, vm.exec(.drop));
 
     // Test underflow with only one item on stack
-    try vm.exec(.{ .push_const = 5 });
+    try vm.exec(.{ .push_const_int = 5 });
     try std.testing.expectError(error.StackUnderflow, vm.exec(.add));
     try std.testing.expectError(error.StackUnderflow, vm.exec(.sub));
     try std.testing.expectError(error.StackUnderflow, vm.exec(.mul));
@@ -222,11 +240,11 @@ test "VM stack overflow" {
     // Fill the stack to capacity
     var i: usize = 0;
     while (i < MAX_STACK_SIZE) : (i += 1) {
-        try vm.exec(.{ .push_const = @intCast(i) });
+        try vm.exec(.{ .push_const_int = @intCast(i) });
     }
 
     // Next push should overflow
-    try std.testing.expectError(error.StackOverflow, vm.exec(.{ .push_const = 100 }));
+    try std.testing.expectError(error.StackOverflow, vm.exec(.{ .push_const_int = 100 }));
     try std.testing.expectError(error.StackOverflow, vm.exec(.dup));
 }
 
@@ -234,8 +252,8 @@ test "VM division by zero" {
     var vm = VM.init();
     defer vm.deinit();
 
-    try vm.exec(.{ .push_const = 10 });
-    try vm.exec(.{ .push_const = 0 });
+    try vm.exec(.{ .push_const_int = 10 });
+    try vm.exec(.{ .push_const_int = 0 });
     try std.testing.expectError(error.DivByZero, vm.exec(.div));
 }
 
@@ -244,23 +262,23 @@ test "VM arithmetic operations" {
     defer vm.deinit();
 
     // Test push and add
-    try vm.exec(.{ .push_const = 1 });
-    try vm.exec(.{ .push_const = 2 });
+    try vm.exec(.{ .push_const_int = 1 });
+    try vm.exec(.{ .push_const_int = 2 });
     try vm.exec(.add);
     try std.testing.expectEqual(@as(Word, 3), vm.stack[vm.stack_pointer - 1]);
 
     // Test multiplication
-    try vm.exec(.{ .push_const = 4 });
+    try vm.exec(.{ .push_const_int = 4 });
     try vm.exec(.mul);
     try std.testing.expectEqual(@as(Word, 12), vm.stack[vm.stack_pointer - 1]);
 
     // Test subtraction
-    try vm.exec(.{ .push_const = 2 });
+    try vm.exec(.{ .push_const_int = 2 });
     try vm.exec(.sub);
     try std.testing.expectEqual(@as(Word, 10), vm.stack[vm.stack_pointer - 1]);
 
     // Test division
-    try vm.exec(.{ .push_const = 2 });
+    try vm.exec(.{ .push_const_int = 2 });
     try vm.exec(.div);
     try std.testing.expectEqual(@as(Word, 5), vm.stack[vm.stack_pointer - 1]);
 
