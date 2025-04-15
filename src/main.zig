@@ -19,6 +19,15 @@ const ValueType = enum(u8) {
     boolean = 0x03,
 };
 
+const IntComparisonOp = enum {
+    eq,
+    ne,
+    lt,
+    gt,
+    lte,
+    gte,
+};
+
 const StringValue = struct {
     len: usize,
     bytes: []u8,
@@ -30,7 +39,7 @@ const Instruction = union(enum) {
     sub,
     mul,
     div,
-
+    i_comp: IntComparisonOp,
     // String instructions
     concat,
 
@@ -144,6 +153,18 @@ const VM = struct {
                 const a = try self.pop_int();
                 if (b == 0) return error.DivByZero;
                 try self.push_int(a / b);
+            },
+            .i_comp => |op| {
+                const a = try self.pop_int();
+                const b = try self.pop_int();
+                switch (op) {
+                    .eq => try self.push_boolean(b == a),
+                    .ne => try self.push_boolean(b != a),
+                    .lt => try self.push_boolean(b < a),
+                    .gt => try self.push_boolean(b > a),
+                    .lte => try self.push_boolean(b <= a),
+                    .gte => try self.push_boolean(b >= a),
+                }
             },
             .concat => {
                 const result = try self.string_concat();
@@ -940,4 +961,106 @@ test "Conditional jump functionality" {
     try std.testing.expectEqual(@as(usize, 2), vm.stack_pointer);
     try std.testing.expectEqual(@as(Word, 30), try vm.pop_int());
     try std.testing.expectEqual(@as(Word, 20), try vm.pop_int());
+}
+
+test "Integer comparison operations" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var vm = VM.init(gpa.allocator());
+    defer vm.deinit();
+
+    // Test equal comparison
+    try vm.exec(.{ .push_int = 10 });
+    try vm.exec(.{ .push_int = 10 });
+    try vm.exec(.{ .i_comp = .eq });
+    try std.testing.expectEqual(true, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    try vm.exec(.{ .push_int = 10 });
+    try vm.exec(.{ .push_int = 20 });
+    try vm.exec(.{ .i_comp = .eq });
+    try std.testing.expectEqual(false, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    // Test not equal comparison
+    try vm.exec(.{ .push_int = 10 });
+    try vm.exec(.{ .push_int = 20 });
+    try vm.exec(.{ .i_comp = .ne });
+    try std.testing.expectEqual(true, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    try vm.exec(.{ .push_int = 10 });
+    try vm.exec(.{ .push_int = 10 });
+    try vm.exec(.{ .i_comp = .ne });
+    try std.testing.expectEqual(false, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    // Test less than comparison
+    try vm.exec(.{ .push_int = 10 });
+    try vm.exec(.{ .push_int = 20 });
+    try vm.exec(.{ .i_comp = .lt });
+    try std.testing.expectEqual(true, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    try vm.exec(.{ .push_int = 20 });
+    try vm.exec(.{ .push_int = 10 });
+    try vm.exec(.{ .i_comp = .lt });
+    try std.testing.expectEqual(false, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    // Test greater than comparison
+    try vm.exec(.{ .push_int = 20 });
+    try vm.exec(.{ .push_int = 10 });
+    try vm.exec(.{ .i_comp = .gt });
+    try std.testing.expectEqual(true, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    try vm.exec(.{ .push_int = 10 });
+    try vm.exec(.{ .push_int = 20 });
+    try vm.exec(.{ .i_comp = .gt });
+    try std.testing.expectEqual(false, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    // Test less than or equal comparison
+    try vm.exec(.{ .push_int = 10 });
+    try vm.exec(.{ .push_int = 10 });
+    try vm.exec(.{ .i_comp = .lte });
+    try std.testing.expectEqual(true, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    try vm.exec(.{ .push_int = 10 });
+    try vm.exec(.{ .push_int = 20 });
+    try vm.exec(.{ .i_comp = .lte });
+    try std.testing.expectEqual(true, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    try vm.exec(.{ .push_int = 20 });
+    try vm.exec(.{ .push_int = 10 });
+    try vm.exec(.{ .i_comp = .lte });
+    try std.testing.expectEqual(false, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    // Test greater than or equal comparison
+    try vm.exec(.{ .push_int = 10 });
+    try vm.exec(.{ .push_int = 10 });
+    try vm.exec(.{ .i_comp = .gte });
+    try std.testing.expectEqual(true, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    try vm.exec(.{ .push_int = 20 });
+    try vm.exec(.{ .push_int = 10 });
+    try vm.exec(.{ .i_comp = .gte });
+    try std.testing.expectEqual(true, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    try vm.exec(.{ .push_int = 10 });
+    try vm.exec(.{ .push_int = 20 });
+    try vm.exec(.{ .i_comp = .gte });
+    try std.testing.expectEqual(false, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    // Test type mismatch error
+    try vm.exec(.{ .push_int = 10 });
+    try vm.exec(.{ .push_string = "test" });
+    try std.testing.expectError(error.TypeMismatch, vm.exec(.{ .i_comp = .eq }));
 }
