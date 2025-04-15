@@ -50,6 +50,7 @@ const Instruction = union(enum) {
 
     // Control flow
     halt,
+    jmp: usize,
 };
 
 const VMTrap = error{
@@ -186,6 +187,9 @@ const VM = struct {
                 try self.push_boolean(value);
             },
             .halt => {},
+            .jmp => |target| {
+                self.instruction_pointer = target;
+            },
         }
     }
 
@@ -872,5 +876,27 @@ test "VM run with early halt" {
 
     // Verify stack state - should only have the 10
     try std.testing.expectEqual(@as(usize, 1), vm.stack_pointer);
+    try std.testing.expectEqual(@as(Word, 10), try vm.pop_int());
+}
+
+test "Jump instruction basic functionality" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var vm = VM.init(gpa.allocator());
+    defer vm.deinit();
+
+    // Test simple jump forward
+    var program = [_]Instruction{
+        .{ .push_int = 10 },
+        .{ .jmp = 3 }, // Jump to instruction 3
+        .{ .push_int = 20 }, // Should be skipped
+        .{ .push_int = 30 },
+        .halt,
+    };
+
+    try vm.run(&program);
+
+    try std.testing.expectEqual(@as(usize, 2), vm.stack_pointer);
+    try std.testing.expectEqual(@as(Word, 30), try vm.pop_int());
     try std.testing.expectEqual(@as(Word, 10), try vm.pop_int());
 }
