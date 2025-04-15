@@ -47,6 +47,9 @@ const Instruction = union(enum) {
     push_int: u64,
     push_string: []const u8,
     push_boolean: bool,
+
+    // Control flow
+    halt,
 };
 
 const VMTrap = error{
@@ -61,6 +64,9 @@ const VMTrap = error{
     StackUnderflow,
     StackOverflow,
     OutOfMemory,
+
+    // Control flow errors
+    ProgramOverflow,
 };
 
 fn value_type(word: Word) ValueType {
@@ -94,6 +100,18 @@ const VM = struct {
                 self.free(ptr, value_type(word));
             }
         }
+    }
+
+    pub fn run(self: *VM, program: []Instruction) VMTrap!void {
+        self.instruction_pointer = 0;
+        while (self.instruction_pointer < program.len) {
+            const instruction = program[self.instruction_pointer];
+            if (instruction == .halt) {
+                return;
+            }
+            try self.exec(instruction);
+        }
+        return error.ProgramOverflow;
     }
 
     pub fn exec(self: *VM, instruction: Instruction) VMTrap!void {
@@ -167,6 +185,7 @@ const VM = struct {
             .push_boolean => |value| {
                 try self.push_boolean(value);
             },
+            .halt => {},
         }
     }
 
@@ -758,4 +777,100 @@ test "VM boolean operations" {
 
     try vm.exec(.{ .push_string = "test" });
     try std.testing.expectError(error.TypeMismatch, vm.exec(.not));
+}
+
+test "VM run function with halt" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var vm = VM.init(gpa.allocator());
+    defer vm.deinit();
+
+    // Create a program that performs arithmetic and ends with halt
+    var program = [_]Instruction{
+        .{ .push_int = 10 },
+        .{ .push_int = 5 },
+        .add,
+        .{ .push_int = 3 },
+        .mul,
+        .halt,
+    };
+
+    // Run the program
+    try vm.run(&program);
+
+    // Verify stack state (10 + 5) * 3 = 45
+    try std.testing.expectEqual(@as(usize, 1), vm.stack_pointer);
+    try std.testing.expectEqual(@as(Word, 45), try vm.pop_int());
+}
+
+test "VM run function without halt" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var vm = VM.init(gpa.allocator());
+    defer vm.deinit();
+
+    // Create a program without halt instruction
+    var program = [_]Instruction{
+        .{ .push_int = 10 },
+        .{ .push_int = 5 },
+        .add,
+    };
+
+    // Verify it returns ProgramOverflow error
+    try std.testing.expectError(error.ProgramOverflow, vm.run(&program));
+}
+
+test "VM run with complex program" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var vm = VM.init(gpa.allocator());
+    defer vm.deinit();
+
+    // Create a more complex program with string operations
+    var program = [_]Instruction{
+        .{ .push_string = "Hello, " },
+        .{ .push_string = "World!" },
+        .concat,
+        .{ .push_int = 42 },
+        .dup,
+        .add,
+        .halt,
+    };
+
+    // Run the program
+    try vm.run(&program);
+
+    // Verify stack state - should have 84 (42+42) and "Hello, World!"
+    try std.testing.expectEqual(@as(usize, 2), vm.stack_pointer);
+
+    // First check the integer result
+    const int_result = try vm.pop_int();
+    try std.testing.expectEqual(@as(Word, 84), int_result);
+
+    // Then check the string result
+    const str_result = try vm.pop_string();
+    defer vm.allocator.free(str_result);
+    try std.testing.expectEqualStrings("Hello, World!", str_result);
+}
+
+test "VM run with early halt" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var vm = VM.init(gpa.allocator());
+    defer vm.deinit();
+
+    // Create a program where halt appears before all instructions
+    var program = [_]Instruction{
+        .{ .push_int = 10 },
+        .halt,
+        .{ .push_int = 5 }, // Should not execute
+        .add, // Should not execute
+    };
+
+    // Run the program
+    try vm.run(&program);
+
+    // Verify stack state - should only have the 10
+    try std.testing.expectEqual(@as(usize, 1), vm.stack_pointer);
+    try std.testing.expectEqual(@as(Word, 10), try vm.pop_int());
 }
