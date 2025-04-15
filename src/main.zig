@@ -28,7 +28,7 @@ const Instruction = union(enum) {
     // Stack manipulation instructions
     dup,
     drop,
-    push_const_int: u64,
+    push_int: u64,
 };
 
 const VMTrap = error{
@@ -117,7 +117,7 @@ const VM = struct {
                 if (self.stack_pointer == 0) return error.StackUnderflow;
                 self.stack_pointer -= 1;
             },
-            .push_const_int => |value| {
+            .push_int => |value| {
                 try self.push_int(value);
             },
         }
@@ -195,8 +195,8 @@ pub fn main() !void {
     defer vm.deinit();
 
     // Test push and add
-    try vm.exec(.{ .push_const_int = 1 });
-    try vm.exec(.{ .push_const_int = 2 });
+    try vm.exec(.{ .push_int = 1 });
+    try vm.exec(.{ .push_int = 2 });
     print_vm(&vm);
     try vm.exec(.add);
     print_vm(&vm);
@@ -219,13 +219,13 @@ test "VM stack manipulation instructions" {
     var vm = VM.init();
     defer vm.deinit();
 
-    // Test push_const_int
-    try vm.exec(.{ .push_const_int = 42 });
+    // Test push_int
+    try vm.exec(.{ .push_int = 42 });
     try std.testing.expectEqual(@as(usize, 1), vm.stack_pointer);
     try std.testing.expectEqual(@as(Word, 42), try vm.pop_int());
 
     // Test dup
-    try vm.exec(.{ .push_const_int = 42 });
+    try vm.exec(.{ .push_int = 42 });
     try vm.exec(.dup);
     try std.testing.expectEqual(@as(usize, 2), vm.stack_pointer);
     const val1 = try vm.pop_int();
@@ -234,28 +234,28 @@ test "VM stack manipulation instructions" {
     try std.testing.expectEqual(@as(Word, 42), val2);
 
     // Test drop
-    try vm.exec(.{ .push_const_int = 42 });
+    try vm.exec(.{ .push_int = 42 });
     try vm.exec(.drop);
     try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
 
     // Test multiple push operations
-    try vm.exec(.{ .push_const_int = 10 });
-    try vm.exec(.{ .push_const_int = 20 });
-    try vm.exec(.{ .push_const_int = 30 });
+    try vm.exec(.{ .push_int = 10 });
+    try vm.exec(.{ .push_int = 20 });
+    try vm.exec(.{ .push_int = 30 });
     try std.testing.expectEqual(@as(usize, 3), vm.stack_pointer);
     try std.testing.expectEqual(@as(Word, 30), try vm.pop_int());
     try std.testing.expectEqual(@as(Word, 20), try vm.pop_int());
     try std.testing.expectEqual(@as(Word, 10), try vm.pop_int());
 
     // Test multiple drops
-    try vm.exec(.{ .push_const_int = 42 });
-    try vm.exec(.{ .push_const_int = 10 });
+    try vm.exec(.{ .push_int = 42 });
+    try vm.exec(.{ .push_int = 10 });
     try vm.exec(.drop);
     try std.testing.expectEqual(@as(usize, 1), vm.stack_pointer);
     try std.testing.expectEqual(@as(Word, 42), try vm.pop_int());
 
     // Test dup with multiple items on stack
-    try vm.exec(.{ .push_const_int = 10 });
+    try vm.exec(.{ .push_int = 10 });
     try vm.exec(.dup);
     try std.testing.expectEqual(@as(usize, 2), vm.stack_pointer);
     try std.testing.expectEqual(@as(Word, 10), try vm.pop_int());
@@ -267,32 +267,32 @@ test "VM integer overflow" {
     defer vm.deinit();
 
     // Test addition overflow
-    try vm.exec(.{ .push_const_int = std.math.maxInt(Word) });
-    try vm.exec(.{ .push_const_int = 1 });
+    try vm.exec(.{ .push_int = std.math.maxInt(Word) });
+    try vm.exec(.{ .push_int = 1 });
     try std.testing.expectError(error.IntegerOverflow, vm.exec(.add));
 
     // Reset stack
     vm.stack_pointer = 0;
 
     // Test subtraction overflow (underflow)
-    try vm.exec(.{ .push_const_int = 0 });
-    try vm.exec(.{ .push_const_int = 1 });
+    try vm.exec(.{ .push_int = 0 });
+    try vm.exec(.{ .push_int = 1 });
     try std.testing.expectError(error.IntegerOverflow, vm.exec(.sub));
 
     // Reset stack
     vm.stack_pointer = 0;
 
     // Test multiplication overflow
-    try vm.exec(.{ .push_const_int = std.math.maxInt(Word) });
-    try vm.exec(.{ .push_const_int = 2 });
+    try vm.exec(.{ .push_int = std.math.maxInt(Word) });
+    try vm.exec(.{ .push_int = 2 });
     try std.testing.expectError(error.IntegerOverflow, vm.exec(.mul));
 
     // Reset stack
     vm.stack_pointer = 0;
 
     // Test large multiplication overflow
-    try vm.exec(.{ .push_const_int = std.math.maxInt(Word) / 2 + 1 });
-    try vm.exec(.{ .push_const_int = 2 });
+    try vm.exec(.{ .push_int = std.math.maxInt(Word) / 2 + 1 });
+    try vm.exec(.{ .push_int = 2 });
     try std.testing.expectError(error.IntegerOverflow, vm.exec(.mul));
 }
 
@@ -308,7 +308,7 @@ test "VM stack underflow" {
     try std.testing.expectError(error.StackUnderflow, vm.exec(.drop));
 
     // Test underflow with only one item on stack
-    try vm.exec(.{ .push_const_int = 5 });
+    try vm.exec(.{ .push_int = 5 });
     try std.testing.expectError(error.StackUnderflow, vm.exec(.add));
     try std.testing.expectError(error.StackUnderflow, vm.exec(.sub));
     try std.testing.expectError(error.StackUnderflow, vm.exec(.mul));
@@ -322,11 +322,11 @@ test "VM stack overflow" {
     // Fill the stack to capacity
     var i: usize = 0;
     while (i < MAX_STACK_SIZE) : (i += 1) {
-        try vm.exec(.{ .push_const_int = @intCast(i) });
+        try vm.exec(.{ .push_int = @intCast(i) });
     }
 
     // Next push should overflow
-    try std.testing.expectError(error.StackOverflow, vm.exec(.{ .push_const_int = 100 }));
+    try std.testing.expectError(error.StackOverflow, vm.exec(.{ .push_int = 100 }));
     try std.testing.expectError(error.StackOverflow, vm.exec(.dup));
 }
 
@@ -334,8 +334,8 @@ test "VM division by zero" {
     var vm = VM.init();
     defer vm.deinit();
 
-    try vm.exec(.{ .push_const_int = 10 });
-    try vm.exec(.{ .push_const_int = 0 });
+    try vm.exec(.{ .push_int = 10 });
+    try vm.exec(.{ .push_int = 0 });
     try std.testing.expectError(error.DivByZero, vm.exec(.div));
 }
 
@@ -344,25 +344,25 @@ test "VM arithmetic operations" {
     defer vm.deinit();
 
     // Test push and add
-    try vm.exec(.{ .push_const_int = 1 });
-    try vm.exec(.{ .push_const_int = 2 });
+    try vm.exec(.{ .push_int = 1 });
+    try vm.exec(.{ .push_int = 2 });
     try vm.exec(.add);
     try std.testing.expectEqual(@as(Word, 3), try vm.pop_int());
 
     // Test multiplication
-    try vm.exec(.{ .push_const_int = 3 });
-    try vm.exec(.{ .push_const_int = 4 });
+    try vm.exec(.{ .push_int = 3 });
+    try vm.exec(.{ .push_int = 4 });
     try vm.exec(.mul);
     try std.testing.expectEqual(@as(Word, 12), try vm.pop_int());
 
     // Test subtraction and division
-    try vm.exec(.{ .push_const_int = 12 });
-    try vm.exec(.{ .push_const_int = 2 });
+    try vm.exec(.{ .push_int = 12 });
+    try vm.exec(.{ .push_int = 2 });
     try vm.exec(.sub);
     try std.testing.expectEqual(@as(Word, 10), try vm.pop_int());
 
-    try vm.exec(.{ .push_const_int = 10 });
-    try vm.exec(.{ .push_const_int = 2 });
+    try vm.exec(.{ .push_int = 10 });
+    try vm.exec(.{ .push_int = 2 });
     try vm.exec(.div);
     try std.testing.expectEqual(@as(Word, 5), try vm.pop_int());
 
@@ -378,32 +378,32 @@ test "VM arithmetic operations with non-immediate values" {
     const large_value = MAX_IMMEDIATE_INT + 1;
 
     // Test addition with non-immediate values
-    try vm.exec(.{ .push_const_int = large_value });
-    try vm.exec(.{ .push_const_int = large_value });
+    try vm.exec(.{ .push_int = large_value });
+    try vm.exec(.{ .push_int = large_value });
     try vm.exec(.add);
     try std.testing.expectEqual(@as(Word, large_value * 2), try vm.pop_int());
 
     // Test multiplication with non-immediate values
-    try vm.exec(.{ .push_const_int = large_value });
-    try vm.exec(.{ .push_const_int = 2 });
+    try vm.exec(.{ .push_int = large_value });
+    try vm.exec(.{ .push_int = 2 });
     try vm.exec(.mul);
     try std.testing.expectEqual(@as(Word, large_value * 2), try vm.pop_int());
 
     // Test subtraction with non-immediate values
-    try vm.exec(.{ .push_const_int = large_value * 2 });
-    try vm.exec(.{ .push_const_int = large_value });
+    try vm.exec(.{ .push_int = large_value * 2 });
+    try vm.exec(.{ .push_int = large_value });
     try vm.exec(.sub);
     try std.testing.expectEqual(@as(Word, large_value), try vm.pop_int());
 
     // Test division with non-immediate values
-    try vm.exec(.{ .push_const_int = large_value * 2 });
-    try vm.exec(.{ .push_const_int = 2 });
+    try vm.exec(.{ .push_int = large_value * 2 });
+    try vm.exec(.{ .push_int = 2 });
     try vm.exec(.div);
     try std.testing.expectEqual(@as(Word, large_value), try vm.pop_int());
 
     // Test mixed immediate and non-immediate operations
-    try vm.exec(.{ .push_const_int = large_value });
-    try vm.exec(.{ .push_const_int = 1 }); // This will be immediate
+    try vm.exec(.{ .push_int = large_value });
+    try vm.exec(.{ .push_int = 1 }); // This will be immediate
     try vm.exec(.add);
     try std.testing.expectEqual(@as(Word, large_value + 1), try vm.pop_int());
 }
