@@ -18,6 +18,11 @@ const ValueType = enum(u8) {
     string = 0x02,
 };
 
+const StringValue = struct {
+    len: usize,
+    bytes: []u8,
+};
+
 const Instruction = union(enum) {
     // Arithmetic instructions
     add,
@@ -72,7 +77,7 @@ const VM = struct {
         for (self.stack[0..self.stack_pointer]) |word| {
             if (is_pointer(word)) {
                 const ptr = unpack_pointer(word);
-                self.free(ptr);
+                self.free(ptr, value_type(word));
             }
         }
     }
@@ -135,7 +140,7 @@ const VM = struct {
         const ptr = unpack_pointer(word);
         const aligned_ptr = @as(*align(8) anyopaque, @alignCast(ptr));
         const value = @as(*align(8) u64, @ptrCast(aligned_ptr)).*;
-        self.free(ptr);
+        self.free(ptr, ty);
         return value;
     }
 
@@ -148,10 +153,14 @@ const VM = struct {
 
         const ptr = unpack_pointer(word);
         const aligned_ptr = @as(*align(8) anyopaque, @alignCast(ptr));
-        const ptr_slice = @as([*]u8, @ptrCast(aligned_ptr));
-        // The length is stored in the first 8 bytes
-        const len = @as(*u64, @ptrCast(aligned_ptr)).*;
-        return ptr_slice[8 .. 8 + len];
+        const string_value = @as(*StringValue, @ptrCast(aligned_ptr));
+
+        // Make a copy of the string bytes
+        const result = try self.allocator.alloc(u8, string_value.len);
+        @memcpy(result, string_value.bytes);
+
+        self.free(ptr, ty);
+        return result;
     }
 
     fn push_int(self: *VM, value: u64) VMTrap!void {
@@ -172,9 +181,13 @@ const VM = struct {
     }
 
     fn alloc_string(self: *VM, str: []const u8) VMTrap!Word {
-        const bytes = try self.alloc(str.len);
-        @memcpy(bytes, str);
-        return pack_pointer(bytes.ptr, ValueType.string, 0);
+        const string_value = try self.allocator.create(StringValue);
+        string_value.* = .{
+            .len = str.len,
+            .bytes = try self.allocator.alloc(u8, str.len),
+        };
+        @memcpy(string_value.bytes, str);
+        return pack_pointer(string_value, ValueType.string, 0);
     }
 
     fn alloc_int(self: *VM, value: u64) VMTrap!Word {
@@ -189,10 +202,17 @@ const VM = struct {
         return try self.allocator.alignedAlloc(u8, 8, n);
     }
 
-    fn free(self: *VM, ptr: *anyopaque) void {
-        const aligned_ptr = @as(*align(8) anyopaque, @alignCast(ptr));
-        const ptr_slice = @as([*]align(8) u8, @ptrCast(aligned_ptr))[0..@sizeOf(u64)];
-        self.allocator.free(ptr_slice);
+    fn free(self: *VM, ptr: *anyopaque, ty: ValueType) void {
+        if (ty == ValueType.string) {
+            const aligned_ptr = @as(*align(8) anyopaque, @alignCast(ptr));
+            const string_value = @as(*StringValue, @ptrCast(aligned_ptr));
+            self.allocator.free(string_value.bytes);
+            self.allocator.destroy(string_value);
+        } else {
+            const aligned_ptr = @as(*align(8) anyopaque, @alignCast(ptr));
+            const ptr_slice = @as([*]align(8) u8, @ptrCast(aligned_ptr))[0..@sizeOf(u64)];
+            self.allocator.free(ptr_slice);
+        }
     }
 };
 
@@ -298,42 +318,6 @@ test "VM stack manipulation instructions" {
     try std.testing.expectEqual(@as(Word, 10), try vm.pop_int());
     try std.testing.expectEqual(@as(Word, 10), try vm.pop_int());
 }
-
-// test "VM integer overflow" {
-//     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-//     defer _ = gpa.deinit();
-//     var vm = VM.init(gpa.allocator());
-//     defer vm.deinit();
-
-//     // Test pushing a string constant
-//     const test_str = "Hello, world!";
-//     try vm.exec(.{ .push_string = test_str });
-//     try std.testing.expectEqual(@as(usize, 1), vm.stack_pointer);
-
-//     // Pop and verify the string
-//     const popped_str = try vm.pop_string();
-//     try std.testing.expectEqualStrings(test_str, popped_str);
-//     try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
-
-//     // Test pushing multiple strings
-//     const str1 = "First string";
-//     const str2 = "Second string";
-//     try vm.exec(.{ .push_string = str1 });
-//     try vm.exec(.{ .push_string = str2 });
-//     try std.testing.expectEqual(@as(usize, 2), vm.stack_pointer);
-
-//     // Pop in reverse order and verify
-//     const popped_str2 = try vm.pop_string();
-//     const popped_str1 = try vm.pop_string();
-//     try std.testing.expectEqualStrings(str2, popped_str2);
-//     try std.testing.expectEqualStrings(str1, popped_str1);
-
-//     // Test empty string
-//     const empty_str = "";
-//     try vm.exec(.{ .push_string = empty_str });
-//     const popped_empty = try vm.pop_string();
-//     try std.testing.expectEqualStrings(empty_str, popped_empty);
-// }
 
 test "VM integer overflow" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -491,4 +475,39 @@ test "VM arithmetic operations with non-immediate values" {
     try vm.exec(.{ .push_int = 1 }); // This will be immediate
     try vm.exec(.add);
     try std.testing.expectEqual(@as(Word, large_value + 1), try vm.pop_int());
+}
+
+test "VM string operations" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var vm = VM.init(gpa.allocator());
+    defer vm.deinit();
+
+    // Test pushing a string to the stack
+    const test_string = "Hello, World!";
+    try vm.exec(.{ .push_string = test_string });
+
+    // Verify we can retrieve the string
+    const retrieved = try vm.pop_string();
+    defer vm.allocator.free(retrieved);
+    try std.testing.expectEqualStrings(test_string, retrieved);
+
+    // Test empty string
+    try vm.exec(.{ .push_string = "" });
+    const empty = try vm.pop_string();
+    defer vm.allocator.free(empty);
+    try std.testing.expectEqualStrings("", empty);
+
+    // Test multiple strings
+    try vm.exec(.{ .push_string = "First" });
+    try vm.exec(.{ .push_string = "Second" });
+    const second = try vm.pop_string();
+    defer vm.allocator.free(second);
+    const first = try vm.pop_string();
+    defer vm.allocator.free(first);
+    try std.testing.expectEqualStrings("Second", second);
+    try std.testing.expectEqualStrings("First", first);
+
+    // Test stack underflow
+    try std.testing.expectError(error.StackUnderflow, vm.pop_string());
 }
