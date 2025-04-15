@@ -42,6 +42,7 @@ const Instruction = union(enum) {
     i_comp: IntComparisonOp,
     // String instructions
     concat,
+    str_eq,
 
     // Boolean instructions
     @"or",
@@ -165,6 +166,13 @@ const VM = struct {
                     .lte => try self.push_boolean(b <= a),
                     .gte => try self.push_boolean(b >= a),
                 }
+            },
+            .str_eq => {
+                const b = try self.pop_string();
+                defer self.allocator.free(b);
+                const a = try self.pop_string();
+                defer self.allocator.free(a);
+                try self.push_boolean(std.mem.eql(u8, a, b));
             },
             .concat => {
                 const result = try self.string_concat();
@@ -1063,4 +1071,44 @@ test "Integer comparison operations" {
     try vm.exec(.{ .push_int = 10 });
     try vm.exec(.{ .push_string = "test" });
     try std.testing.expectError(error.TypeMismatch, vm.exec(.{ .i_comp = .eq }));
+}
+
+test "VM string equality comparison" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    var vm = VM.init(gpa.allocator());
+    defer vm.deinit();
+
+    // Test equal strings
+    try vm.exec(.{ .push_string = "hello" });
+    try vm.exec(.{ .push_string = "hello" });
+    try vm.exec(.str_eq);
+    try std.testing.expectEqual(true, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    // Test different strings
+    try vm.exec(.{ .push_string = "hello" });
+    try vm.exec(.{ .push_string = "world" });
+    try vm.exec(.str_eq);
+    try std.testing.expectEqual(false, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    // Test empty strings
+    try vm.exec(.{ .push_string = "" });
+    try vm.exec(.{ .push_string = "" });
+    try vm.exec(.str_eq);
+    try std.testing.expectEqual(true, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    // Test different length strings
+    try vm.exec(.{ .push_string = "hello" });
+    try vm.exec(.{ .push_string = "hello world" });
+    try vm.exec(.str_eq);
+    try std.testing.expectEqual(false, try vm.pop_boolean());
+    try std.testing.expectEqual(@as(usize, 0), vm.stack_pointer);
+
+    // Test type mismatch error
+    try vm.exec(.{ .push_string = "test" });
+    try vm.exec(.{ .push_int = 10 });
+    try std.testing.expectError(error.TypeMismatch, vm.exec(.str_eq));
 }
