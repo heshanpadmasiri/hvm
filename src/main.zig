@@ -89,29 +89,75 @@ fn type_mask(ty: ValueType) u64 {
     return (@as(u64, @intFromEnum(ty)) << 56);
 }
 
+const PAGE_SIZE = 1024;
+
+const Page = struct {
+    data: [PAGE_SIZE]u8,
+    next: ?*Page,
+    allocator: std.mem.Allocator,
+    fba: std.heap.FixedBufferAllocator,
+
+    // FIXME: avoid 0 initialization
+    pub fn init(allocator: std.mem.Allocator) !*Page {
+        const new_page = try allocator.create(Page);
+        initPageData(new_page, allocator);
+        return new_page;
+    }
+
+    pub fn append(self: *Page) !*Page {
+        const new_page = try self.allocator.create(Page);
+        initPageData(new_page, self.allocator);
+        self.next = new_page;
+        return new_page;
+    }
+
+    pub fn deinit(self: *Page) void {
+        if (self.next) |next_page| {
+            next_page.deinit();
+            // No need to destroy next_page here as its deinit will handle that
+        }
+        // Destroy self
+        self.allocator.destroy(self);
+    }
+
+    pub fn get_allocator(self: *Page) std.mem.Allocator {
+        return self.fba.allocator();
+    }
+
+    fn initPageData(page: *Page, allocator: std.mem.Allocator) void {
+        page.* = Page{
+            .data = [_]u8{0} ** PAGE_SIZE,
+            .next = null,
+            .allocator = allocator,
+            .fba = std.heap.FixedBufferAllocator.init(&page.data),
+        };
+    }
+};
+
 const VM = struct {
     stack: [MAX_STACK_SIZE]Word,
     stack_pointer: usize,
     instruction_pointer: usize,
-    allocator: std.mem.Allocator,
+    current_page: *Page,
+    page_index: usize,
+    page_allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator) VM {
+    pub fn init(allocator: std.mem.Allocator) !VM {
+        const page = try Page.init(allocator);
         const self = VM{
             .stack = [_]Word{0} ** MAX_STACK_SIZE,
             .stack_pointer = 0,
             .instruction_pointer = 0,
-            .allocator = allocator,
+            .current_page = page,
+            .page_index = 0,
+            .page_allocator = page.get_allocator(),
         };
         return self;
     }
 
     pub fn deinit(self: *VM) void {
-        for (self.stack[0..self.stack_pointer]) |word| {
-            if (is_pointer(word)) {
-                const ptr = unpack_pointer(word);
-                self.free(ptr, value_type(word));
-            }
-        }
+        // No need to manually free pointers, they are managed by the Page structure
+        self.current_page.deinit();
     }
 
     pub fn run(self: *VM, program: []Instruction) VMTrap!void {
@@ -169,9 +215,9 @@ const VM = struct {
             },
             .str_eq => {
                 const b = try self.pop_string();
-                defer self.allocator.free(b);
+                // defer self.allocator.free(b);
                 const a = try self.pop_string();
-                defer self.allocator.free(a);
+                // defer self.allocator.free(a);
                 try self.push_boolean(std.mem.eql(u8, a, b));
             },
             .concat => {
@@ -229,10 +275,14 @@ const VM = struct {
 
     fn string_concat(self: *VM) VMTrap![]u8 {
         const b_result = try self.pop_string_value();
-        defer self.free(b_result.ptr, ValueType.string);
         const a_result = try self.pop_string_value();
-        defer self.free(a_result.ptr, ValueType.string);
-        const result = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ a_result.string_value.bytes, b_result.string_value.bytes });
+        const a_len = a_result.string_value.len;
+        const b_len = b_result.string_value.len;
+        const total_len = a_len + b_len;
+
+        const result = try self.alloc_n(u8, total_len);
+        @memcpy(result[0..a_len], a_result.string_value.bytes);
+        @memcpy(result[a_len..total_len], b_result.string_value.bytes);
         return result;
     }
 
@@ -250,20 +300,17 @@ const VM = struct {
         const ptr = unpack_pointer(word);
         const aligned_ptr = @as(*align(8) anyopaque, @alignCast(ptr));
         const value = @as(*align(8) u64, @ptrCast(aligned_ptr)).*;
-        self.free(ptr, ty);
         return value;
     }
 
     fn pop_string(self: *VM) VMTrap![]const u8 {
         const pop_result = try self.pop_string_value();
-        const ptr = pop_result.ptr;
         const string_value = pop_result.string_value;
 
         // Make a copy of the string bytes
-        const result = try self.allocator.alloc(u8, string_value.len);
+        const result = try self.alloc_n(u8, string_value.len);
         @memcpy(result, string_value.bytes);
 
-        self.free(ptr, ValueType.string);
         return result;
     }
 
@@ -324,7 +371,7 @@ const VM = struct {
     }
 
     fn string_value_from_owned(self: *VM, str: []u8) VMTrap!Word {
-        const string_value = try self.allocator.create(StringValue);
+        const string_value = try self.alloc(StringValue);
         string_value.* = .{
             .len = str.len,
             .bytes = str,
@@ -333,38 +380,43 @@ const VM = struct {
     }
 
     fn alloc_string(self: *VM, str: []const u8) VMTrap!Word {
-        const string_value = try self.allocator.create(StringValue);
+        const string_value = try self.alloc(StringValue);
         string_value.* = .{
             .len = str.len,
-            .bytes = try self.allocator.alloc(u8, str.len),
+            .bytes = try self.alloc_n(u8, str.len),
         };
         @memcpy(string_value.bytes, str);
         return pack_pointer(string_value, ValueType.string, 0);
     }
 
     fn alloc_int(self: *VM, value: u64) VMTrap!Word {
-        const bytes = try self.alloc(@sizeOf(u64));
-        const aligned_ptr = @as([*]align(8) u8, @alignCast(bytes.ptr));
-        const ptr = @as([*]u64, @ptrCast(aligned_ptr));
-        ptr[0] = value;
-        return pack_pointer(bytes.ptr, ValueType.integer, 0);
+        const ptr = try self.alloc(u64);
+        ptr.* = value;
+        return pack_pointer(ptr, ValueType.integer, 0);
     }
 
-    fn alloc(self: *VM, n: usize) VMTrap![]u8 {
-        return try self.allocator.alignedAlloc(u8, 8, n);
-    }
-
-    fn free(self: *VM, ptr: *anyopaque, ty: ValueType) void {
-        if (ty == ValueType.string) {
-            const aligned_ptr = @as(*align(8) anyopaque, @alignCast(ptr));
-            const string_value = @as(*StringValue, @ptrCast(aligned_ptr));
-            self.allocator.free(string_value.bytes);
-            self.allocator.destroy(string_value);
-        } else {
-            const aligned_ptr = @as(*align(8) anyopaque, @alignCast(ptr));
-            const ptr_slice = @as([*]align(8) u8, @ptrCast(aligned_ptr))[0..@sizeOf(u64)];
-            self.allocator.free(ptr_slice);
+    fn alloc_n(self: *VM, comptime T: type, n: usize) VMTrap![]T {
+        const size = @sizeOf(T) * n;
+        if (self.page_index + size > PAGE_SIZE) {
+            self.page_index = 0;
+            self.current_page = try self.current_page.append();
+            self.page_allocator = self.current_page.get_allocator();
         }
+        const ptr = try self.page_allocator.alloc(T, n);
+        self.page_index += size;
+        return ptr;
+    }
+
+    fn alloc(self: *VM, comptime T: type) VMTrap!*T {
+        const size = @sizeOf(T);
+        if (self.page_index + size > PAGE_SIZE) {
+            self.page_index = 0;
+            self.current_page = try self.current_page.append();
+            self.page_allocator = self.current_page.get_allocator();
+        }
+        const result = try self.page_allocator.create(T);
+        self.page_index += size;
+        return result;
     }
 };
 
@@ -398,7 +450,7 @@ fn unpack_immediate(word: Word) u64 {
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    var vm = VM.init(gpa.allocator());
+    var vm = try VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Test pushing true boolean value
@@ -492,7 +544,7 @@ fn print_vm(vm: *const VM) void {
 test "VM stack manipulation instructions" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    var vm = VM.init(gpa.allocator());
+    var vm = try VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Test push_int
@@ -541,7 +593,7 @@ test "VM stack manipulation instructions" {
 test "VM integer overflow" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    var vm = VM.init(gpa.allocator());
+    var vm = try VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Test addition overflow
@@ -577,7 +629,7 @@ test "VM integer overflow" {
 test "VM stack underflow" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    var vm = VM.init(gpa.allocator());
+    var vm = try VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Test underflow on empty stack
@@ -598,7 +650,7 @@ test "VM stack underflow" {
 test "VM stack overflow" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    var vm = VM.init(gpa.allocator());
+    var vm = try VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Fill the stack to capacity
@@ -615,7 +667,7 @@ test "VM stack overflow" {
 test "VM division by zero" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    var vm = VM.init(gpa.allocator());
+    var vm = try VM.init(gpa.allocator());
     defer vm.deinit();
 
     try vm.exec(.{ .push_int = 10 });
@@ -626,7 +678,7 @@ test "VM division by zero" {
 test "VM arithmetic operations" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    var vm = VM.init(gpa.allocator());
+    var vm = try VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Test push and add
@@ -659,7 +711,7 @@ test "VM arithmetic operations" {
 test "VM arithmetic operations with non-immediate values" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    var vm = VM.init(gpa.allocator());
+    var vm = try VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Create a value that will be non-immediate (larger than MAX_IMMEDIATE_INT)
@@ -699,7 +751,7 @@ test "VM arithmetic operations with non-immediate values" {
 test "VM string operations" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    var vm = VM.init(gpa.allocator());
+    var vm = try VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Test pushing a string to the stack
@@ -708,22 +760,18 @@ test "VM string operations" {
 
     // Verify we can retrieve the string
     const retrieved = try vm.pop_string();
-    defer vm.allocator.free(retrieved);
     try std.testing.expectEqualStrings(test_string, retrieved);
 
     // Test empty string
     try vm.exec(.{ .push_string = "" });
     const empty = try vm.pop_string();
-    defer vm.allocator.free(empty);
     try std.testing.expectEqualStrings("", empty);
 
     // Test multiple strings
     try vm.exec(.{ .push_string = "First" });
     try vm.exec(.{ .push_string = "Second" });
     const second = try vm.pop_string();
-    defer vm.allocator.free(second);
     const first = try vm.pop_string();
-    defer vm.allocator.free(first);
     try std.testing.expectEqualStrings("Second", second);
     try std.testing.expectEqualStrings("First", first);
 
@@ -732,7 +780,6 @@ test "VM string operations" {
     try vm.exec(.{ .push_string = "World!" });
     try vm.exec(.concat);
     const concatenated = try vm.pop_string();
-    defer vm.allocator.free(concatenated);
     try std.testing.expectEqualStrings("Hello, World!", concatenated);
 
     // Test stack underflow
@@ -742,7 +789,7 @@ test "VM string operations" {
 test "VM boolean operations" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    var vm = VM.init(gpa.allocator());
+    var vm = try VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Test pushing true boolean value
@@ -820,7 +867,7 @@ test "VM boolean operations" {
 test "VM run function with halt" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    var vm = VM.init(gpa.allocator());
+    var vm = try VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Create a program that performs arithmetic and ends with halt
@@ -844,7 +891,7 @@ test "VM run function with halt" {
 test "VM run function without halt" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    var vm = VM.init(gpa.allocator());
+    var vm = try VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Create a program without halt instruction
@@ -861,7 +908,7 @@ test "VM run function without halt" {
 test "VM run with complex program" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    var vm = VM.init(gpa.allocator());
+    var vm = try VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Create a more complex program with string operations
@@ -887,14 +934,13 @@ test "VM run with complex program" {
 
     // Then check the string result
     const str_result = try vm.pop_string();
-    defer vm.allocator.free(str_result);
     try std.testing.expectEqualStrings("Hello, World!", str_result);
 }
 
 test "VM run with early halt" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    var vm = VM.init(gpa.allocator());
+    var vm = try VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Create a program where halt appears before all instructions
@@ -916,7 +962,7 @@ test "VM run with early halt" {
 test "Jump instruction basic functionality" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    var vm = VM.init(gpa.allocator());
+    var vm = try VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Test simple jump forward
@@ -938,7 +984,7 @@ test "Jump instruction basic functionality" {
 test "Conditional jump functionality" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    var vm = VM.init(gpa.allocator());
+    var vm = try VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Test conditional jump with true condition
@@ -974,7 +1020,7 @@ test "Conditional jump functionality" {
 test "Integer comparison operations" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    var vm = VM.init(gpa.allocator());
+    var vm = try VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Test equal comparison
@@ -1076,7 +1122,7 @@ test "Integer comparison operations" {
 test "VM string equality comparison" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    var vm = VM.init(gpa.allocator());
+    var vm = try VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Test equal strings
@@ -1116,7 +1162,7 @@ test "VM string equality comparison" {
 test "VM conditional branching with comparisons" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    var vm = VM.init(gpa.allocator());
+    var vm = try VM.init(gpa.allocator());
     defer vm.deinit();
 
     // Create a program that uses integer comparison and conditional branching
@@ -1153,7 +1199,6 @@ test "VM conditional branching with comparisons" {
     try std.testing.expectEqual(@as(usize, 1), vm.stack_pointer);
 
     const result = try vm.pop_string();
-    defer vm.allocator.free(result);
     try std.testing.expectEqualStrings("not equal", result);
 
     // Create a complex program with multiple comparisons and branches
@@ -1177,6 +1222,5 @@ test "VM conditional branching with comparisons" {
     try std.testing.expectEqual(@as(usize, 1), vm.stack_pointer);
 
     const complex_result = try vm.pop_string();
-    defer vm.allocator.free(complex_result);
     try std.testing.expectEqualStrings("condition passed", complex_result);
 }
